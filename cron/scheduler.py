@@ -2266,10 +2266,45 @@ def run_job(
             session_db=_session_db)
         _audit = _FireAudit(job, job_id, model)
 
-        result = _run_agent_with_watchdog(
-            agent, prompt, job, job_id, job_name, scope.task_id, cancel_event,
-            worker_state=_worker_state)
-        final_response = _final_response_from_result(result, job_id, job_name, AIAgent)
+        custom_runtime = None
+        if job.get("custom_runtime"):
+            from custom_loader import get_runtime
+            custom_runtime = get_runtime(job)
+        if custom_runtime is not None:
+            from custom.core.runtime import RuntimeContext
+
+            def _make_worker(worker, worker_number):
+                worker_job = dict(job)
+                worker_job["model"] = worker.model
+                worker_job["reasoning_effort"] = worker.reasoning
+                worker_jc = _CronJobConfig(jc.cfg, worker.model, jc.model_cfg, jc.cron_default_provider)
+                worker_setup = _resolve_cron_agent_setup(worker_job, job_id, job_name, worker_jc)
+                if worker_setup.blocked is not None:
+                    raise RuntimeError(f"Custom worker blocked: {worker_setup.blocked[3]}")
+                worker_session = f"{_cron_session_id}_worker_{worker_number}"
+                worker_agent = _construct_cron_agent(
+                    AIAgent, worker_job, _cfg, worker_setup, workdir=scope.workdir,
+                    session_id=worker_session, session_db=_session_db)
+                return worker_agent, worker_job, worker_session
+
+            custom_result = custom_runtime.run(RuntimeContext(
+                job=job, job_id=job_id, job_name=job_name, prompt=prompt,
+                controller_agent=agent, ai_agent_type=AIAgent, config=_cfg, setup=setup,
+                workdir=scope.workdir, session_db=_session_db, session_id=_cron_session_id,
+                task_id=scope.task_id, cancel_event=cancel_event,
+                run_agent=lambda a, p, j, jid, jn, tid, ce: _run_agent_with_watchdog(
+                    a, p, j, jid, jn, tid, ce),
+                final_response=_final_response_from_result,
+                make_worker=_make_worker, teardown=_teardown_cron_agent))
+            result = custom_result.result
+            final_response = custom_result.final_response
+            if custom_result.delivery_manifest is not None:
+                job["_custom_delivery_manifest"] = custom_result.delivery_manifest
+        else:
+            result = _run_agent_with_watchdog(
+                agent, prompt, job, job_id, job_name, scope.task_id, cancel_event,
+                worker_state=_worker_state)
+            final_response = _final_response_from_result(result, job_id, job_name, AIAgent)
         # Keep final_response clean for delivery logic (empty = no delivery).
         logged_response = final_response if final_response else "(No response generated)"
         output = _run_doc_header(job, job_name, job_id, prompt) + f"## Response\n\n{logged_response}\n"
@@ -2627,6 +2662,29 @@ def _save_compose_deliver(
         output_file = save_job_output(job["id"], output)
     if verbose:
         logger.info("Output saved to: %s", output_file)
+
+    manifest = job.pop("_custom_delivery_manifest", None)
+    if d.success and manifest is not None:
+        try:
+            with fence.side_effect_fence() as owns_manifest_delivery:
+                if not owns_manifest_delivery:
+                    raise _FireClaimLostDuringSideEffect
+                if _normalize_deliver_value(job.get("deliver")) == "local":
+                    d.delivery_error = "custom delivery manifest has no configured Hermes delivery lane"
+                else:
+                    from custom.core.delivery import dispatch_manifest
+                    d.delivery_attempted = True
+                    d.delivery_error = dispatch_manifest(
+                        manifest,
+                        lambda record_id, content: _deliver_result(
+                            dict(job, execution_id=f"{job.get('execution_id', job['id'])}:{record_id}"),
+                            content, adapters=adapters, loop=loop),
+                    )
+        except _FireClaimLostDuringSideEffect:
+            raise
+        except Exception as manifest_exc:
+            d.delivery_error = f"custom manifest delivery failed: {manifest_exc}"
+            logger.error("Job '%s': %s", job["id"], d.delivery_error)
 
     # A shutdown-killed tool subprocess can leave a plausible final_response from truncated
     # output; force the honest "interrupted" failure path. Peek-only (consumed later).
