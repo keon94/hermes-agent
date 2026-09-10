@@ -44,6 +44,7 @@ from hermes_time import now as _hermes_now
 from agent.interrupt_compat import request_hard_interrupt
 from agent.delegation_context import (
     enter_non_dispatcher_owned_context, exit_non_dispatcher_owned_context)
+from custom_loader import get_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -2266,10 +2267,36 @@ def run_job(
             session_db=_session_db)
         _audit = _FireAudit(job, job_id, model)
 
-        result = _run_agent_with_watchdog(
-            agent, prompt, job, job_id, job_name, scope.task_id, cancel_event,
-            worker_state=_worker_state)
-        final_response = _final_response_from_result(result, job_id, job_name, AIAgent)
+        custom_runtime = get_runtime(job) if job.get("custom_runtime") else None
+        if custom_runtime is not None:
+            from custom_runtime import RuntimeContext, WorkerContext
+
+            custom_result = custom_runtime.run(RuntimeContext(
+                job=job, job_id=job_id, job_name=job_name, prompt=str(prompt),
+                controller_agent=agent, ai_agent_type=AIAgent, config=_cfg, setup=setup,
+                workdir=scope.workdir, session_db=_session_db, session_id=_cron_session_id,
+                task_id=scope.task_id, cancel_event=cancel_event,
+                run_agent=lambda a, p, j, jid, jn, tid, ce: _run_agent_with_watchdog(
+                    a, p, j, jid, jn, tid, ce),
+                final_response=_final_response_from_result,
+                worker_context=WorkerContext(
+                    job=job, job_id=job_id, job_name=job_name, cron_session_id=_cron_session_id,
+                    config=_cfg, cron_job_config=jc, workdir=scope.workdir, session_db=_session_db,
+                    make_cron_job_config=_CronJobConfig,
+                    resolve_setup=_resolve_cron_agent_setup,
+                    construct_agent=_construct_cron_agent, ai_agent_type=AIAgent),
+                teardown=_teardown_cron_agent))
+            result = custom_result.result
+            final_response = custom_result.final_response
+            if custom_result.job is not None:
+                job["_custom_job"] = custom_result.job
+            if custom_result.delivery_manifest is not None:
+                job["_custom_delivery_manifest"] = custom_result.delivery_manifest
+        else:
+            result = _run_agent_with_watchdog(
+                agent, prompt, job, job_id, job_name, scope.task_id, cancel_event,
+                worker_state=_worker_state)
+            final_response = _final_response_from_result(result, job_id, job_name, AIAgent)
         # Keep final_response clean for delivery logic (empty = no delivery).
         logged_response = final_response if final_response else "(No response generated)"
         output = _run_doc_header(job, job_name, job_id, prompt) + f"## Response\n\n{logged_response}\n"
@@ -2627,6 +2654,25 @@ def _save_compose_deliver(
         output_file = save_job_output(job["id"], output)
     if verbose:
         logger.info("Output saved to: %s", output_file)
+
+    custom_job = job.pop("_custom_job", None)
+    manifest = job.pop("_custom_delivery_manifest", None)
+    if d.success and manifest is not None:
+        try:
+            with fence.side_effect_fence() as owns_manifest_delivery:
+                if not owns_manifest_delivery:
+                    raise _FireClaimLostDuringSideEffect
+                if custom_job is None:
+                    d.delivery_error = "custom delivery manifest has no custom Job handler"
+                else:
+                    d.delivery_attempted = True
+                    d.delivery_error = custom_job.handle_manifest(
+                        manifest, adapters=adapters, loop=loop, send=_deliver_result)
+        except _FireClaimLostDuringSideEffect:
+            raise
+        except Exception as manifest_exc:
+            d.delivery_error = f"custom manifest delivery failed: {manifest_exc}"
+            logger.error("Job '%s': %s", job["id"], d.delivery_error)
 
     # A shutdown-killed tool subprocess can leave a plausible final_response from truncated
     # output; force the honest "interrupted" failure path. Peek-only (consumed later).
