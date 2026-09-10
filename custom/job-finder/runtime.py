@@ -13,10 +13,11 @@ from custom.core.policy import (
     parse_delivery_manifest,
     write_worker_record,
 )
-from custom.core.runtime import CustomRunResult, RuntimeContext
+from custom.hooks.job import Job
+from custom_runtime import CustomRunResult, Runtime, RuntimeContext
 
 
-class JobFinderRuntime:
+class JobFinderRuntime(Runtime):
     """Orchestrate a repository-defined workflow through policy-selected workers."""
 
     def handles(self, job: dict) -> bool:
@@ -67,13 +68,14 @@ class JobFinderRuntime:
             controller_result, context.job_id, context.job_name, context.ai_agent_type)
         phases = self._plan(controller_response, allowed)
         ledger = WorkerLedger(policy)
+        job = Job(context.job, context.worker_context)
         run_id = str(context.job.get("execution_id") or context.session_id)
         worker_count = 0
 
         def execute(worker, phase, handoff):
             nonlocal worker_count
             worker_count += 1
-            worker_agent, worker_job, worker_session = context.make_worker(worker, worker_count)
+            worker_agent, worker_job, worker_session = job.make_worker(worker, worker_count)
             worker_prompt = (
                 "You are a policy-selected worker. Perform only the bounded phase below using the repository "
                 "instructions and authorized tools. Return a concise, evidence-backed handoff.\n\n"
@@ -103,4 +105,4 @@ class JobFinderRuntime:
             result={"completed": True, "total_tokens": sum(x["tokens"] for x in results),
                     "policy_commit": policy.repository_commit, "policy_sha256": policy.policy_sha256,
                     "worker_ledger": ledger.summary(), "worker_results": results},
-            final_response=final, delivery_manifest=manifest)
+            final_response=final, job=job, delivery_manifest=manifest)

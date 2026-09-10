@@ -4,6 +4,8 @@ from __future__ import annotations
 from functools import lru_cache
 import importlib
 
+from custom_runtime import Runtime
+
 
 @lru_cache(maxsize=16)
 def _runtime(name: str):
@@ -12,7 +14,7 @@ def _runtime(name: str):
     return None
 
 
-def get_runtime(job: dict):
+def get_runtime(job: dict) -> Runtime | None:
     """Return an operator-selected runtime; unknown selectors fail closed."""
     name = job.get("custom_runtime")
     if not isinstance(name, str) or not name:

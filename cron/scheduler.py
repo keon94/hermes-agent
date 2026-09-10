@@ -44,6 +44,7 @@ from hermes_time import now as _hermes_now
 from agent.interrupt_compat import request_hard_interrupt
 from agent.delegation_context import (
     enter_non_dispatcher_owned_context, exit_non_dispatcher_owned_context)
+from custom_loader import get_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -2266,38 +2267,29 @@ def run_job(
             session_db=_session_db)
         _audit = _FireAudit(job, job_id, model)
 
-        custom_runtime = None
-        if job.get("custom_runtime"):
-            from custom_loader import get_runtime
-            custom_runtime = get_runtime(job)
+        custom_runtime = get_runtime(job) if job.get("custom_runtime") else None
         if custom_runtime is not None:
-            from custom.core.runtime import RuntimeContext
-
-            def _make_worker(worker, worker_number):
-                worker_job = dict(job)
-                worker_job["model"] = worker.model
-                worker_job["reasoning_effort"] = worker.reasoning
-                worker_jc = _CronJobConfig(jc.cfg, worker.model, jc.model_cfg, jc.cron_default_provider)
-                worker_setup = _resolve_cron_agent_setup(worker_job, job_id, job_name, worker_jc)
-                if worker_setup.blocked is not None:
-                    raise RuntimeError(f"Custom worker blocked: {worker_setup.blocked[3]}")
-                worker_session = f"{_cron_session_id}_worker_{worker_number}"
-                worker_agent = _construct_cron_agent(
-                    AIAgent, worker_job, _cfg, worker_setup, workdir=scope.workdir,
-                    session_id=worker_session, session_db=_session_db)
-                return worker_agent, worker_job, worker_session
+            from custom_runtime import RuntimeContext, WorkerContext
 
             custom_result = custom_runtime.run(RuntimeContext(
-                job=job, job_id=job_id, job_name=job_name, prompt=prompt,
+                job=job, job_id=job_id, job_name=job_name, prompt=str(prompt),
                 controller_agent=agent, ai_agent_type=AIAgent, config=_cfg, setup=setup,
                 workdir=scope.workdir, session_db=_session_db, session_id=_cron_session_id,
                 task_id=scope.task_id, cancel_event=cancel_event,
                 run_agent=lambda a, p, j, jid, jn, tid, ce: _run_agent_with_watchdog(
                     a, p, j, jid, jn, tid, ce),
                 final_response=_final_response_from_result,
-                make_worker=_make_worker, teardown=_teardown_cron_agent))
+                worker_context=WorkerContext(
+                    job=job, job_id=job_id, job_name=job_name, cron_session_id=_cron_session_id,
+                    config=_cfg, cron_job_config=jc, workdir=scope.workdir, session_db=_session_db,
+                    make_cron_job_config=_CronJobConfig,
+                    resolve_setup=_resolve_cron_agent_setup,
+                    construct_agent=_construct_cron_agent, ai_agent_type=AIAgent),
+                teardown=_teardown_cron_agent))
             result = custom_result.result
             final_response = custom_result.final_response
+            if custom_result.job is not None:
+                job["_custom_job"] = custom_result.job
             if custom_result.delivery_manifest is not None:
                 job["_custom_delivery_manifest"] = custom_result.delivery_manifest
         else:
@@ -2663,23 +2655,19 @@ def _save_compose_deliver(
     if verbose:
         logger.info("Output saved to: %s", output_file)
 
+    custom_job = job.pop("_custom_job", None)
     manifest = job.pop("_custom_delivery_manifest", None)
     if d.success and manifest is not None:
         try:
             with fence.side_effect_fence() as owns_manifest_delivery:
                 if not owns_manifest_delivery:
                     raise _FireClaimLostDuringSideEffect
-                if _normalize_deliver_value(job.get("deliver")) == "local":
-                    d.delivery_error = "custom delivery manifest has no configured Hermes delivery lane"
+                if custom_job is None:
+                    d.delivery_error = "custom delivery manifest has no custom Job handler"
                 else:
-                    from custom.core.delivery import dispatch_manifest
                     d.delivery_attempted = True
-                    d.delivery_error = dispatch_manifest(
-                        manifest,
-                        lambda record_id, content: _deliver_result(
-                            dict(job, execution_id=f"{job.get('execution_id', job['id'])}:{record_id}"),
-                            content, adapters=adapters, loop=loop),
-                    )
+                    d.delivery_error = custom_job.handle_manifest(
+                        manifest, adapters=adapters, loop=loop, send=_deliver_result)
         except _FireClaimLostDuringSideEffect:
             raise
         except Exception as manifest_exc:
