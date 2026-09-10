@@ -4,13 +4,45 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from custom.core.policy import WorkerLedger, WorkerPolicy
+from custom.core.policy import PolicyError, WorkerLedger, WorkerPolicy
 
 
 @dataclass(frozen=True)
 class Phase:
     name: str
     objective: str
+
+
+class BudgetExceeded(PolicyError):
+    """Raised after preserving the latest worker handoff when a policy cap is exhausted."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        results: list[dict[str, Any]],
+        latest_response: str,
+    ):
+        super().__init__(message)
+        self.results = results
+        self.latest_response = latest_response
+
+
+def _record_or_stop(
+    ledger: WorkerLedger,
+    worker: WorkerPolicy,
+    phase: str,
+    usage: int,
+    response: str,
+    results: list[dict[str, Any]],
+) -> None:
+    result = {"worker": worker.model, "phase": phase, "response": response, "tokens": usage}
+    try:
+        ledger.record(worker, phase, usage)
+    except PolicyError as exc:
+        raise BudgetExceeded(
+            str(exc), results=[*results, {**result, "over_budget": True}], latest_response=response)
+    results.append(result)
 
 
 def choose_worker(policy, phase: str) -> WorkerPolicy:
@@ -66,8 +98,7 @@ def run_policy_workers(
             raise RuntimeError(f"Worker {worker.model} did not return numeric total_tokens")
         if not response:
             raise RuntimeError(f"Worker {worker.model} returned an empty handoff")
-        ledger.record(worker, phase.name, usage)
-        results.append({"worker": worker.model, "phase": phase.name, "response": response, "tokens": usage})
+        _record_or_stop(ledger, worker, phase.name, usage, response, results)
         handoff = response
 
         reviewer = require_review(policy, worker)
@@ -81,7 +112,6 @@ def run_policy_workers(
                 raise RuntimeError(f"Reviewer {reviewer.model} did not return numeric total_tokens")
             if not review_response:
                 raise RuntimeError(f"Reviewer {reviewer.model} returned an empty handoff")
-            ledger.record(reviewer, review_name, review_usage)
-            results.append({"worker": reviewer.model, "phase": review_name, "response": review_response, "tokens": review_usage})
+            _record_or_stop(ledger, reviewer, review_name, review_usage, review_response, results)
             handoff = review_response
     return results

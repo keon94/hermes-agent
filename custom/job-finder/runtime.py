@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any
 
-from custom.core.execution import Phase, run_policy_workers
+from custom.core.execution import BudgetExceeded, Phase, run_policy_workers
 from custom.core.policy import (
     PolicyError,
     WorkerLedger,
@@ -51,6 +51,28 @@ class JobFinderRuntime(Runtime):
                 raise PolicyError("Controller phase objective is invalid")
             result.append(Phase(item["phase"], objective.strip()))
         return result
+
+    def _controller_manifest(
+        self,
+        context: RuntimeContext,
+        latest_handoff: str,
+        stop_reason: str,
+    ) -> str:
+        prompt = (
+            "You are the lightweight Job Finder controller. Do not use tools. Convert the latest "
+            "verified worker handoff into the final JSON delivery manifest so notifications can be "
+            "sent even though worker token budget is exhausted. Preserve every role card already "
+            "found or written to Drive in the handoff. Add one run_summary.content explaining that the "
+            "workflow stopped before all planned phases because of token-budget exhaustion. Return only "
+            "JSON in this exact shape: {\"telegram_manifest\":{\"role_cards\":[{\"card_id\":\"...\","
+            "\"content\":\"...\"}],\"run_summary\":{\"content\":\"...\"}}}. Do not include target, "
+            "platform, chat_id, or thread_id.\n\n"
+            f"Stop reason: {stop_reason}\n\nLatest handoff:\n{latest_handoff}"
+        )
+        result = context.run_agent(
+            context.controller_agent, prompt, context.job, context.job_id,
+            context.job_name, context.task_id, context.cancel_event)
+        return context.final_response(result, context.job_id, context.job_name, context.ai_agent_type)
 
     def run(self, context: RuntimeContext) -> CustomRunResult:
         settings = self._settings(context.job)
@@ -98,11 +120,20 @@ class JobFinderRuntime(Runtime):
             finally:
                 context.teardown(worker_agent, context.job_id)
 
-        results = run_policy_workers(policy, phases, execute=execute, ledger=ledger)
-        final = results[-1]["response"]
+        stopped_reason = None
+        try:
+            results = run_policy_workers(policy, phases, execute=execute, ledger=ledger)
+            final = results[-1]["response"]
+            completed = True
+        except BudgetExceeded as exc:
+            results = exc.results
+            stopped_reason = str(exc)
+            final = self._controller_manifest(context, exc.latest_response, stopped_reason)
+            completed = False
         manifest = parse_delivery_manifest(final)
         return CustomRunResult(
-            result={"completed": True, "total_tokens": sum(x["tokens"] for x in results),
+            result={"completed": completed, "stopped_reason": stopped_reason,
+                    "total_tokens": sum(x["tokens"] for x in results),
                     "policy_commit": policy.repository_commit, "policy_sha256": policy.policy_sha256,
                     "worker_ledger": ledger.summary(), "worker_results": results},
             final_response=final, job=job, delivery_manifest=manifest)
