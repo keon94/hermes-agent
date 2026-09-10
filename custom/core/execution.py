@@ -48,25 +48,27 @@ def _record_or_stop(
     results.append(result)
 
 
-def choose_worker(policy, phase: str) -> WorkerPolicy:
-    """Return the policy-selected worker; ratio precedence handles intentional overlap."""
+def choose_worker(policy, phase: str, ledger: WorkerLedger) -> WorkerPolicy:
+    """Return the first phase-authorized worker with remaining individual capacity."""
     try:
-        return policy.select_worker(phase, {})[0]
+        return policy.select_worker(phase, ledger.usage_by_model)[0]
     except Exception as exc:
         raise ValueError(f"Policy cannot select a worker for phase {phase!r}: {exc}") from exc
 
 
-def require_review(policy, worker: WorkerPolicy) -> WorkerPolicy | None:
+def require_review(policy, worker: WorkerPolicy, ledger: WorkerLedger) -> WorkerPolicy | None:
     """Lower-priority work requires a higher-priority reviewer before release."""
-    higher = [candidate for candidate in policy.workers if candidate.ratio > worker.ratio]
+    higher = policy.workers[:policy.workers.index(worker)]
     if not higher:
         return None
-    reviewers = [candidate for candidate in higher if any(
-        phase in candidate.phases for phase in policy.review_phases
-    )]
+    reviewers = [
+        candidate for candidate in higher
+        if any(phase in candidate.phases for phase in policy.review_phases)
+        and (candidate.token_cap is None or ledger.usage_by_model[candidate.model] < candidate.token_cap)
+    ]
     if not reviewers:
         raise ValueError("Policy must contain exactly one higher-priority review worker")
-    return max(reviewers, key=lambda candidate: candidate.ratio)
+    return reviewers[0]
 
 
 def review_phase_name(policy, worker: WorkerPolicy) -> str:
@@ -93,7 +95,7 @@ def run_policy_workers(
     handoff = ""
     results: list[dict[str, Any]] = []
     for phase in phases:
-        worker = choose_worker(policy, phase.name)
+        worker = choose_worker(policy, phase.name, ledger)
         result = execute(worker, phase, handoff)
         usage = result.get("total_tokens")
         response = str(result.get("final_response") or "").strip()
@@ -104,7 +106,7 @@ def run_policy_workers(
         _record_or_stop(ledger, worker, phase.name, usage, response, result.get("raw_response"), results)
         handoff = response
 
-        reviewer = require_review(policy, worker)
+        reviewer = require_review(policy, worker, ledger)
         if reviewer is not None:
             review_name = review_phase_name(policy, reviewer)
             review = Phase(review_name, f"Review and verify the prior {phase.name} phase before release.")

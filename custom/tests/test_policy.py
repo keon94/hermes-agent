@@ -27,16 +27,14 @@ def _document(body: str) -> str:
 
 def _valid_policy() -> str:
     return _document(
-        "  version: 1\n"
-        "  total_token_cap: 1000\n"
+        "  version: 2\n"
         "  workers:\n"
         "    - model: terra\n"
         "      reasoning: high\n"
-        "      ratio: 0.75\n"
+        "      token_cap: 0\n"
         "      phases: [analysis, review, verification]\n"
         "    - model: luna\n"
         "      reasoning: low\n"
-        "      ratio: 0.25\n"
         "      phases: [extraction]\n"
         "  verification:\n"
         "    lower_priority_result_requires_higher_priority_review: true\n"
@@ -45,25 +43,46 @@ def _valid_policy() -> str:
     )
 
 
-def test_parse_policy_derives_allocation_from_total_and_ratio():
+def test_parse_policy_uses_individual_optional_worker_caps():
     policy = parse_runtime_policy(_valid_policy())
 
-    assert policy.total_token_cap == 1000
-    assert [(w.model, w.allocation) for w in policy.workers] == [("terra", 750), ("luna", 250)]
+    assert [(w.model, w.token_cap) for w in policy.workers] == [("terra", None), ("luna", None)]
     assert policy.select_worker("extraction", {})[0].model == "luna"
     assert policy.select_worker("analysis", {})[0].model == "terra"
 
 
-def test_parse_policy_rejects_redundant_worker_token_cap():
-    with pytest.raises(PolicyError, match="must not define token_cap"):
-        parse_runtime_policy(_valid_policy().replace("      ratio: 0.75", "      ratio: 0.75\n      token_cap: 750"))
+def test_parse_policy_accepts_positive_worker_token_cap():
+    policy = parse_runtime_policy(_valid_policy().replace("      token_cap: 0", "      token_cap: 750"))
+    assert policy.workers[0].token_cap == 750
 
 
-@pytest.mark.parametrize("replacement", ["0.90", "0.0", "nope"])
-def test_parse_policy_rejects_invalid_or_nonunit_ratios(replacement):
-    text = _valid_policy().replace("      ratio: 0.25", f"      ratio: {replacement}")
+def test_absent_or_zero_worker_cap_is_unlimited():
+    policy = parse_runtime_policy(_valid_policy())
+    ledger = WorkerLedger(policy)
+
+    for worker in policy.workers:
+        ledger.record(worker, "test", 1_000_000)
+
+    assert ledger.summary() == {
+        "terra": {"used": 1_000_000, "token_cap": None},
+        "luna": {"used": 1_000_000, "token_cap": None},
+    }
+
+
+@pytest.mark.parametrize("replacement", ["-1", "1.5", "nope"])
+def test_parse_policy_rejects_invalid_worker_token_cap(replacement):
+    text = _valid_policy().replace("      token_cap: 0", f"      token_cap: {replacement}")
     with pytest.raises(PolicyError):
         parse_runtime_policy(text)
+
+
+def test_parse_policy_rejects_legacy_global_cap_and_ratios():
+    with pytest.raises(PolicyError, match="must be 2"):
+        parse_runtime_policy(_valid_policy().replace("  version: 2", "  version: 1"))
+    with pytest.raises(PolicyError, match="total_token_cap"):
+        parse_runtime_policy(_valid_policy().replace("  workers:", "  total_token_cap: 1000\n  workers:"))
+    with pytest.raises(PolicyError, match="ratio"):
+        parse_runtime_policy(_valid_policy().replace("      token_cap: 0", "      ratio: 0.75"))
 
 
 def test_load_runtime_policy_records_commit_and_hash_and_refuses_dirty_checkout(tmp_path: Path):
@@ -87,8 +106,8 @@ def test_load_runtime_policy_records_commit_and_hash_and_refuses_dirty_checkout(
 
 
 def test_worker_record_is_durable_and_preserves_unavailable_usage(tmp_path: Path):
-    worker = PolicyWorker("luna", "high", 0.25, 250, ("extraction",))
-    policy = RuntimePolicy(1, 1000, (worker,), False, (), "abc", "hash")
+    worker = PolicyWorker("luna", "high", 250, ("extraction",))
+    policy = RuntimePolicy(2, (worker,), False, (), "abc", "hash")
     record = write_worker_record(
         tmp_path,
         run_id="run-1",

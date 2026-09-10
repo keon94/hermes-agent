@@ -23,8 +23,8 @@ ROOT_MANIFEST = (
 
 
 def test_budget_exhaustion_preserves_latest_worker_handoff():
-    worker = PolicyWorker("luna", "low", 1.0, 10, ("extraction",))
-    policy = RuntimePolicy(1, 10, (worker,), False, (), "abc", "hash")
+    worker = PolicyWorker("luna", "low", 10, ("extraction",))
+    policy = RuntimePolicy(2, (worker,), False, (), "abc", "hash")
 
     with pytest.raises(BudgetExceeded) as raised:
         run_policy_workers(
@@ -41,9 +41,9 @@ def test_budget_exhaustion_preserves_latest_worker_handoff():
 
 
 def test_budget_exhaustion_after_mandatory_review_preserves_reviewer_handoff():
-    reviewer = PolicyWorker("terra", "high", 0.75, 10, ("review",))
-    worker = PolicyWorker("luna", "low", 0.25, 100, ("extraction",))
-    policy = RuntimePolicy(1, 110, (reviewer, worker), True, (), "abc", "hash", ("review",))
+    reviewer = PolicyWorker("terra", "high", 10, ("review",))
+    worker = PolicyWorker("luna", "low", 100, ("extraction",))
+    policy = RuntimePolicy(2, (reviewer, worker), True, (), "abc", "hash", ("review",))
 
     def execute(selected, phase, _handoff):
         if selected.model == "terra":
@@ -67,8 +67,8 @@ def test_budget_exhaustion_after_mandatory_review_preserves_reviewer_handoff():
 def test_job_finder_budget_exhaustion_uses_controller_for_manifest(monkeypatch, tmp_path, caplog):
     caplog.set_level(logging.INFO)
     runtime_module = importlib.import_module("custom.job-finder.runtime")
-    worker = PolicyWorker("luna", "low", 1.0, 10, ("extraction",))
-    policy = RuntimePolicy(1, 10, (worker,), False, (), "abc", "hash")
+    worker = PolicyWorker("luna", "low", 10, ("extraction",))
+    policy = RuntimePolicy(2, (worker,), False, (), "abc", "hash")
     controller_prompts = []
 
     monkeypatch.setattr(runtime_module, "load_runtime_policy", lambda *_: policy)
@@ -126,7 +126,7 @@ def test_job_finder_budget_exhaustion_uses_controller_for_manifest(monkeypatch, 
     result = runtime_module.JobFinderRuntime().run(context)
 
     assert result.result["completed"] is False
-    assert "exceeded its derived allocation" in result.result["stopped_reason"]
+    assert "exceeded its configured token cap" in result.result["stopped_reason"]
     assert result.delivery_manifest["role_cards"][0]["card_id"] == "role-1"
     assert result.final_response == "saved to Drive\n\n---\n\nStopped after budget exhaustion; delivered partial results."
     assert "\\n" not in result.final_response

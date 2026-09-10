@@ -100,10 +100,10 @@ class JobFinderRuntime(Runtime):
         settings = self._settings(context.job)
         policy = load_runtime_policy(settings["repository_root"], settings["policy_path"])
         logger.info(
-            "Job Finder runtime start: job_id=%s controller_model=%s controller_provider=%s policy_commit=%s policy_sha256=%s total_token_cap=%s workers=%s",
+            "Job Finder runtime start: job_id=%s controller_model=%s controller_provider=%s policy_commit=%s policy_sha256=%s workers=%s",
             context.job_id, context.job.get("model"), context.job.get("provider"),
-            policy.repository_commit, policy.policy_sha256, policy.total_token_cap,
-            [(worker.model, worker.reasoning, worker.allocation, worker.phases) for worker in policy.workers],
+            policy.repository_commit, policy.policy_sha256,
+            [(worker.model, worker.reasoning, worker.token_cap, worker.phases) for worker in policy.workers],
         )
         allowed = {phase for worker in policy.workers for phase in worker.phases}
         planner_prompt = (
@@ -135,9 +135,9 @@ class JobFinderRuntime(Runtime):
             worker_count += 1
             worker_agent, worker_job, worker_session = job.make_worker(worker, worker_count)
             logger.info(
-                "Job Finder worker start: job_id=%s worker_number=%s phase=%s model=%s reasoning=%s allocation=%s session_id=%s",
+                "Job Finder worker start: job_id=%s worker_number=%s phase=%s model=%s reasoning=%s token_cap=%s session_id=%s",
                 context.job_id, worker_count, phase.name, worker.model, worker.reasoning,
-                worker.allocation, worker_session,
+                worker.token_cap, worker_session,
             )
             worker_prompt = (
                 "You are a policy-selected worker. Perform only the bounded phase below using the repository "
