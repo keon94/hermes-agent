@@ -1924,6 +1924,15 @@ def _run_doc_header(job: dict, title: str, job_id: str, prompt: str) -> str:
     )
 
 
+def _display_job_prompt(job: dict, extra_prompt: Optional[str]) -> str:
+    """Prompt text for run documents and custom runtimes, without expanded skill bodies."""
+    base = str(job.get("prompt") or "").strip()
+    extra = str(extra_prompt or "").strip()
+    if base and extra:
+        return f"{base}\n\nAdditional run context:\n{extra}"
+    return base or extra
+
+
 _RunResult = tuple[bool, str, str, Optional[str]]
 
 
@@ -2234,6 +2243,7 @@ def run_job(
     early, prompt = _prepare_job_prompt(job, job_id, job_name, extra_prompt, cancel_event)
     if early is not None:
         return early
+    display_prompt = _display_job_prompt(job, extra_prompt)
     from run_agent import AIAgent
 
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
@@ -2272,7 +2282,7 @@ def run_job(
             from custom_runtime import RuntimeContext, WorkerContext
 
             custom_result = custom_runtime.run(RuntimeContext(
-                job=job, job_id=job_id, job_name=job_name, prompt=str(prompt),
+                job=job, job_id=job_id, job_name=job_name, prompt=display_prompt,
                 controller_agent=agent, ai_agent_type=AIAgent, config=_cfg, setup=setup,
                 workdir=scope.workdir, session_db=_session_db, session_id=_cron_session_id,
                 task_id=scope.task_id, cancel_event=cancel_event,
@@ -2299,7 +2309,7 @@ def run_job(
             final_response = _final_response_from_result(result, job_id, job_name, AIAgent)
         # Keep final_response clean for delivery logic (empty = no delivery).
         logged_response = final_response if final_response else "(No response generated)"
-        output = _run_doc_header(job, job_name, job_id, prompt) + f"## Response\n\n{logged_response}\n"
+        output = _run_doc_header(job, job_name, job_id, display_prompt) + f"## Response\n\n{logged_response}\n"
         logger.info("Job '%s' completed successfully", job_name)
         _audit.write(dict(result, response_silent=_is_cron_silence_response(final_response or "")), None)
         return True, output, final_response, None
@@ -2312,7 +2322,7 @@ def run_job(
             _audit.write({}, error_msg)
         from cron.scheduler_diagnostics import format_run_error
         output = (
-            _run_doc_header(job, f"{job_name} (FAILED)", job_id, prompt)
+            _run_doc_header(job, f"{job_name} (FAILED)", job_id, display_prompt)
             + format_run_error(e)
         )
         return False, output, "", error_msg
