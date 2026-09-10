@@ -103,6 +103,8 @@ def parse_delivery_manifest(response: str) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise PolicyError("Release worker did not return a JSON delivery manifest") from exc
     manifest = document.get("telegram_manifest") if isinstance(document, Mapping) else None
+    if manifest is None and isinstance(document, Mapping) and {"role_cards", "run_summary"} <= set(document):
+        manifest = document
     if not isinstance(manifest, Mapping):
         raise PolicyError("Delivery manifest must define telegram_manifest")
     if any(key in manifest for key in ("target", "platform", "chat_id", "thread_id")):

@@ -34,9 +34,12 @@ def _record_or_stop(
     phase: str,
     usage: int,
     response: str,
+    raw_response: str | None,
     results: list[dict[str, Any]],
 ) -> None:
     result = {"worker": worker.model, "phase": phase, "response": response, "tokens": usage}
+    if raw_response is not None:
+        result["raw_response"] = raw_response
     try:
         ledger.record(worker, phase, usage)
     except PolicyError as exc:
@@ -98,7 +101,7 @@ def run_policy_workers(
             raise RuntimeError(f"Worker {worker.model} did not return numeric total_tokens")
         if not response:
             raise RuntimeError(f"Worker {worker.model} returned an empty handoff")
-        _record_or_stop(ledger, worker, phase.name, usage, response, results)
+        _record_or_stop(ledger, worker, phase.name, usage, response, result.get("raw_response"), results)
         handoff = response
 
         reviewer = require_review(policy, worker)
@@ -112,6 +115,6 @@ def run_policy_workers(
                 raise RuntimeError(f"Reviewer {reviewer.model} did not return numeric total_tokens")
             if not review_response:
                 raise RuntimeError(f"Reviewer {reviewer.model} returned an empty handoff")
-            _record_or_stop(ledger, reviewer, review_name, review_usage, review_response, results)
+            _record_or_stop(ledger, reviewer, review_name, review_usage, review_response, reviewed.get("raw_response"), results)
             handoff = review_response
     return results

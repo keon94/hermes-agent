@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,10 @@ from custom_runtime import RuntimeContext, WorkerContext
 MANIFEST = (
     '{"telegram_manifest":{"role_cards":[{"card_id":"role-1","content":"saved to Drive"}],'
     '"run_summary":{"content":"Stopped after budget exhaustion; delivered partial results."}}}'
+)
+ROOT_MANIFEST = (
+    '{"role_cards":[{"card_id":"role-1","content":"saved to Drive"}],'
+    '"run_summary":{"content":"Stopped after budget exhaustion; delivered partial results."}}'
 )
 
 
@@ -59,7 +64,8 @@ def test_budget_exhaustion_after_mandatory_review_preserves_reviewer_handoff():
     }
 
 
-def test_job_finder_budget_exhaustion_uses_controller_for_manifest(monkeypatch, tmp_path):
+def test_job_finder_budget_exhaustion_uses_controller_for_manifest(monkeypatch, tmp_path, caplog):
+    caplog.set_level(logging.INFO)
     runtime_module = importlib.import_module("custom.job-finder.runtime")
     worker = PolicyWorker("luna", "low", 1.0, 10, ("extraction",))
     policy = RuntimePolicy(1, 10, (worker,), False, (), "abc", "hash")
@@ -122,4 +128,17 @@ def test_job_finder_budget_exhaustion_uses_controller_for_manifest(monkeypatch, 
     assert result.result["completed"] is False
     assert "exceeded its derived allocation" in result.result["stopped_reason"]
     assert result.delivery_manifest["role_cards"][0]["card_id"] == "role-1"
+    assert result.final_response == "saved to Drive\n\n---\n\nStopped after budget exhaustion; delivered partial results."
+    assert "\\n" not in result.final_response
+    assert '"role_cards"' not in result.final_response
     assert any("Convert the latest" in prompt for prompt in controller_prompts)
+    assert "controller_model=None" in caplog.text
+    assert "model=luna reasoning=low" in caplog.text
+
+
+def test_markdown_handoff_accepts_root_delivery_manifest():
+    runtime_module = importlib.import_module("custom.job-finder.runtime")
+
+    assert runtime_module.JobFinderRuntime._markdown_handoff(ROOT_MANIFEST) == (
+        "saved to Drive\n\n---\n\nStopped after budget exhaustion; delivered partial results."
+    )
